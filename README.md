@@ -1,4 +1,4 @@
-# CleanPaste 🧹
+﻿# CleanPaste 🧹
 
 **Always-on clipboard monitor that auto-cleans terminal output when you copy.**
 
@@ -9,7 +9,7 @@ Strips ANSI escape codes, re-joins broken terminal line wraps, converts tables t
 ## Quick Install (one-liner)
 
 ```powershell
-git clone <your-repo-url> CleanPaste && cd CleanPaste && .\Install.ps1
+git clone https://microsoft.ghe.com/bic/CleanPaste && cd CleanPaste && .\Install.ps1
 ```
 
 Runs at every login. Install once, never think about it again.
@@ -83,7 +83,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Tests.ps1
 Share the repo and tell your team:
 
 ```
-git clone <repo-url> CleanPaste && cd CleanPaste && .\Install.ps1
+git clone https://microsoft.ghe.com/bic/CleanPaste && cd CleanPaste && .\Install.ps1
 ```
 
 That's it — runs at login, no admin needed, no manual steps after install.
