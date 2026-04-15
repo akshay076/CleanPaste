@@ -35,8 +35,9 @@ Runs at every login. Install once, never think about it again.
 
 ## How It Works
 
-1. Polls the clipboard every 300ms (lightweight, no noticeable CPU impact)
-2. Parses content into **blocks**: paragraphs, tables, lists, blanks
+1. Detects clipboard changes via Win32 `GetClipboardSequenceNumber()` API (lightweight, no text hashing)
+2. Scores content for terminal artifacts — only rewrites when confidence is high (passwords/tokens pass through)
+3. Parses content into **blocks**: paragraphs, tables, lists, blanks
 3. Renders each block appropriately:
    - Paragraphs: re-joins broken terminal line wraps
    - Tables: converts to HTML clipboard format (renders with borders in Office)
