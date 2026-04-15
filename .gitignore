@@ -1,0 +1,10 @@
+# CleanPaste temp/build artifacts
+*.log
+*.tmp
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# User install directory (not the source)
+.cleanpaste/
