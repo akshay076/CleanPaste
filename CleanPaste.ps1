@@ -159,13 +159,14 @@ function Test-HasTerminalArtifacts([string]$text) {
     $promptLines = ($lines | Where-Object { $_ -match '^\s*(PS\s+[A-Z]:\\[^>]*>)' }).Count
     if ($promptLines -ge 1) { $score += 3 }
 
-    # Terminal-wrapped prose: multiple lines at similar width
+    # Terminal-wrapped prose: lines at similar width (within 10 chars of max)
+    # 2+ lines at ≥ 60 chars wide is a strong enough signal
     $nonEmpty = $lines | Where-Object { $_.Trim() -ne '' }
-    if ($nonEmpty.Count -ge 3) {
+    if ($nonEmpty.Count -ge 2) {
         $lengths = $nonEmpty | ForEach-Object { $_.TrimEnd().Length }
         $maxLen = ($lengths | Measure-Object -Maximum).Maximum
-        $nearMax = @($lengths | Where-Object { $_ -ge ($maxLen - 5) }).Count
-        if ($nearMax -ge ($nonEmpty.Count * 0.4) -and $maxLen -ge 60) { $score += 2 }
+        $nearMax = @($lengths | Where-Object { $_ -ge ($maxLen - 10) }).Count
+        if ($nearMax -ge 2 -and $maxLen -ge 60) { $score += 3 }
     }
 
     return $score -ge 3
