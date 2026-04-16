@@ -129,6 +129,24 @@ Assert-Test "Tree diagram detected as excluded" {
     Test-IsExcluded "src/`n├── file1`n│   ├── file2`n│   └── file3`n└── file4"
 }
 
+Assert-Test "Standalone markdown table triggers cleaning (Tier 1)" {
+    Test-ShouldClean "| Service | Port | Status |`n|---------|------|--------|`n| API | 8080 | Running |`n| Cache | 6379 | Stopped |"
+}
+
+Assert-Test "Standalone markdown table bypasses artifact scoring" {
+    # This table has NO terminal artifacts — only structural content
+    $table = "| Name | Age |`n|------|-----|`n| Alice | 30 |"
+    Test-HasStructuralContent $table
+}
+
+Assert-Test "Plain text does NOT trigger cleaning" {
+    -not (Test-ShouldClean "Hello, this is a normal sentence.")
+}
+
+Assert-Test "Short text (password-like) does NOT trigger cleaning" {
+    -not (Test-ShouldClean "ghp_abc123XYZ789token")
+}
+
 Assert-Test "Plain text not detected as table" {
     -not (Test-IsTable "Hello world. This is plain text.")
 }

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Installs CleanPaste as a background startup task for the current user.
 
@@ -85,8 +85,16 @@ if ($existing) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 }
 
+# Detect which PowerShell is running the installer and use the same for the task
+$psExe = if ($PSVersionTable.PSVersion.Major -ge 7) {
+    (Get-Process -Id $PID).MainModule.FileName
+} else {
+    "powershell.exe"
+}
+Write-Host "  Using: $psExe" -ForegroundColor DarkGray
+
 $action  = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
+    -Execute $psExe `
     -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptDest`""
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME

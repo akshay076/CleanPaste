@@ -8,33 +8,50 @@
     tables to HTML with borders, re-joins broken paragraph wraps, and
     preserves bullet lists and code.
 
-    Only rewrites clipboard when terminal artifacts are detected with high
-    confidence. Passwords, tokens, and normal text pass through untouched.
+    Uses two-tier detection:
+      Tier 1 (Structural): Tables, bullet lists → always clean
+      Tier 2 (Artifacts):  ANSI codes, shell prompts, terminal wrapping → score-based
 
 .NOTES
     Author : Akshay Gautam
-    Version: 2.0.0
+    Version: 2.1.0
     License: MIT
 #>
 
 param(
     [switch]$NoBalloon,      # Suppress tray notifications
-    [int]$PollMs = 300       # Clipboard polling interval in milliseconds
+    [int]$PollMs = 300       # Clipboard check interval in milliseconds
 )
+
+# ── Version check ────────────────────────────────────────────────────────────
+if ($PSVersionTable.PSVersion.Major -lt 5) {
+    Write-Host "ERROR: CleanPaste requires PowerShell 5.1 or later." -ForegroundColor Red
+    Write-Host "Current version: $($PSVersionTable.PSVersion)" -ForegroundColor Red
+    Write-Host "Install PowerShell 7: https://aka.ms/powershell" -ForegroundColor Yellow
+    exit 1
+}
 
 # ── Imports ──────────────────────────────────────────────────────────────────
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # Win32 API for efficient clipboard change detection
-Add-Type -TypeDefinition @"
+try {
+    Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 public class ClipboardApi {
     [DllImport("user32.dll")]
     public static extern int GetClipboardSequenceNumber();
 }
-"@
+"@ -ErrorAction Stop
+} catch {
+    # Type may already be loaded in this session — that's fine
+    if (-not ([System.Management.Automation.PSTypeName]'ClipboardApi').Type) {
+        Write-Host "ERROR: Failed to load Win32 clipboard API: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+}
 
 # ── State ────────────────────────────────────────────────────────────────────
 $script:lastSeqNum     = 0
@@ -100,10 +117,29 @@ function Test-IsCode([string]$text) {
     return $false
 }
 
+function Test-HasStructuralContent([string]$text) {
+    # Tier 1: Structural detection — we KNOW what this content is.
+    # These should always be cleaned regardless of artifact score.
+    $lines = ($text -split "`n") | Where-Object { $_.Trim() -ne '' }
+    if ($lines.Count -lt 2) { return $false }
+
+    # Markdown tables: | col | col | with a |---| separator
+    $hasSeparator = @($lines | Where-Object { $_ -match '^\s*\|?\s*[-:]+[-|:\s]+[-:]+\s*\|?\s*$' }).Count -gt 0
+    $pipeDataLines = @($lines | Where-Object { $_ -match '^\s*\|.+\|' }).Count
+    if ($hasSeparator -and $pipeDataLines -ge 2) { return $true }
+
+    # Box-drawing tables
+    $hasCorners = $text -match '[┌┐└┘╔╗╚╝]'
+    $hasHorizLine = $text -match '[─━═]'
+    $dataRows = @($lines | Where-Object { $_ -match '^\s*[│║┃].+[│║┃]\s*$' }).Count
+    if ($hasCorners -and $hasHorizLine -and $dataRows -ge 1) { return $true }
+
+    return $false
+}
+
 function Test-HasTerminalArtifacts([string]$text) {
-    # Confidence-based detection: only return $true when we're confident
-    # the text contains terminal artifacts worth cleaning.
-    # This prevents rewriting passwords, tokens, normal text, etc.
+    # Tier 2: Artifact detection — we THINK this came from a terminal.
+    # Score-based, needs >= 3 to trigger.
     if ([string]::IsNullOrWhiteSpace($text)) { return $false }
 
     $score = 0
@@ -119,11 +155,11 @@ function Test-HasTerminalArtifacts([string]$text) {
     # Box-drawing / pipe chars used as terminal wrapping
     if ($text -match '[│┃╏╎▌┌┐└┘├┤┬┴┼╔╗╚╝╠╣╦╩╬═║─━]') { $score += 3 }
 
-    # Shell prompts (PS C:\>, $, %)
+    # Shell prompts (PS C:\>)
     $promptLines = ($lines | Where-Object { $_ -match '^\s*(PS\s+[A-Z]:\\[^>]*>)' }).Count
     if ($promptLines -ge 1) { $score += 3 }
 
-    # Terminal-wrapped prose: multiple lines at similar width (within 5 chars of max)
+    # Terminal-wrapped prose: multiple lines at similar width
     $nonEmpty = $lines | Where-Object { $_.Trim() -ne '' }
     if ($nonEmpty.Count -ge 3) {
         $lengths = $nonEmpty | ForEach-Object { $_.TrimEnd().Length }
@@ -132,12 +168,20 @@ function Test-HasTerminalArtifacts([string]$text) {
         if ($nearMax -ge ($nonEmpty.Count * 0.4) -and $maxLen -ge 60) { $score += 2 }
     }
 
-    # Markdown/pipe tables
-    $tableLines = ($lines | Where-Object { $_ -match '^\s*\|.+\|' }).Count
-    if ($tableLines -ge 2) { $score += 2 }
-
-    # Threshold: need score >= 3 to trigger cleaning
     return $score -ge 3
+}
+
+function Test-ShouldClean([string]$text) {
+    # Two-tier detection model:
+    #   Tier 1: Structural content (tables, etc.) → always clean
+    #   Tier 2: Terminal artifacts (ANSI, prompts, wrapping) → score-based
+    if ([string]::IsNullOrWhiteSpace($text)) { return $false }
+
+    # Tier 1: "I know what this is"
+    if (Test-HasStructuralContent $text) { return $true }
+
+    # Tier 2: "I think this came from a terminal"
+    return Test-HasTerminalArtifacts $text
 }
 
 # ── Cleaning functions ───────────────────────────────────────────────────────
@@ -435,7 +479,7 @@ if (-not $NoBalloon) {
 
 Write-Host ""
 Write-Host "  ╔══════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "  ║         CleanPaste v2.0.0                ║" -ForegroundColor Cyan
+Write-Host "  ║         CleanPaste v2.1.0                ║" -ForegroundColor Cyan
 Write-Host "  ║   Clipboard monitor is running...        ║" -ForegroundColor Cyan
 Write-Host "  ║   Copy terminal text and it gets         ║" -ForegroundColor Cyan
 Write-Host "  ║   cleaned automatically.                 ║" -ForegroundColor Cyan
@@ -444,7 +488,7 @@ Write-Host "  ║   Press Ctrl+C to stop.                  ║" -ForegroundColor
 Write-Host "  ╚══════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 
-Write-Log "CleanPaste v2.0.0 started (PollMs=$PollMs, NoBalloon=$NoBalloon)"
+Write-Log "CleanPaste v2.1.0 started (PollMs=$PollMs, NoBalloon=$NoBalloon)"
 
 # Initialize clipboard sequence number
 $script:lastSeqNum = [ClipboardApi]::GetClipboardSequenceNumber()
@@ -478,8 +522,8 @@ try {
             # Reset backoff on successful read
             $script:clipFailCount = 0
 
-            # Confidence gate: only rewrite when terminal artifacts are detected
-            if (-not (Test-HasTerminalArtifacts $currentText)) { continue }
+            # Two-tier detection: structural content OR terminal artifacts
+            if (-not (Test-ShouldClean $currentText)) { continue }
 
             # Clean the text
             $payload = Invoke-CleanText $currentText
