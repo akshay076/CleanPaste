@@ -98,11 +98,19 @@ function Test-IsExcluded([string]$text) {
     if ($allLines.Count -gt 2 -and $junctionLines -ge 2) { return $true }
 
     # Flowcharts: multiple box groups (2+ corner pairs) or arrow characters
+    # But NOT box-drawing tables — those have data rows with │ column separators
     $hasCorners = $text -match '[┌┐└┘╔╗╚╝]'
     if ($hasCorners) {
+        # Arrows are a strong flowchart signal — always exclude
+        $hasArrows = $text -match '──>' -or $text -match '[←→↑↓▶◀]'
+        if ($hasArrows) { return $true }
+
+        # Multiple top-left corners suggest separate boxes (flowchart), not a table
         $cornerCount = ([regex]::Matches($text, '[┌╔]')).Count
-        $hasArrows = $text -match '[────>←→↑↓▶◀]' -or $text -match '──>'
-        if ($cornerCount -ge 2 -or $hasArrows) { return $true }
+        $hasHorizLine = $text -match '[─━═]'
+        $dataRows = @($allLines | Where-Object { $_ -match '^\s*[│║┃].+[│║┃]\s*$' }).Count
+        if ($dataRows -ge 1 -and $hasHorizLine) { return $false }
+        if ($cornerCount -ge 2) { return $true }
     }
 
     return $false
