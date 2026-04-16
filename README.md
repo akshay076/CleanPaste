@@ -7,7 +7,7 @@ Copy from any terminal (Claude Code, Copilot CLI, Codex, PowerShell) and paste c
 ## Quick Install (one-liner)
 
 ```powershell
-git clone https://microsoft.ghe.com/bic/CleanPaste && cd CleanPaste && .\Install.ps1
+git clone https://github.com/akshay076/CleanPaste && cd CleanPaste && .\Install.ps1
 ```
 
 Runs at every login. Install once, never think about it again.
@@ -96,7 +96,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Tests.ps1
 Share the repo and tell your team:
 
 ```
-git clone https://microsoft.ghe.com/bic/CleanPaste && cd CleanPaste && .\Install.ps1
+git clone https://github.com/akshay076/CleanPaste && cd CleanPaste && .\Install.ps1
 ```
 
 That's it — runs at login, no admin needed, no manual steps after install.
