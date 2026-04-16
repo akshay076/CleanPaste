@@ -14,7 +14,7 @@
 
 .NOTES
     Author : Akshay Gautam
-    Version: 2.1.0
+    Version: 3.0.0
     License: MIT
 #>
 
@@ -57,7 +57,7 @@ public class ClipboardApi {
 $script:lastSeqNum     = 0
 $script:cleanedCount   = 0
 $script:running        = $true
-$script:skipNextChange = $false
+$script:writtenSeqNum  = -1
 
 # ── HTML escaping ────────────────────────────────────────────────────────────
 
@@ -77,10 +77,14 @@ function Remove-AnsiEscapes([string]$text) {
 function Test-IsTable([string]$text) {
     $lines = ($text -split "`n") | Where-Object { $_.Trim() -ne '' }
     if ($lines.Count -ge 2) {
-        $hasSeparator = ($lines | Where-Object { $_ -match '^\s*\|?\s*[-:]+[-|:\s]+[-:]+\s*\|?\s*$' }).Count -gt 0
+        # Markdown table: pipe-delimited data + separator row (supports 1+ columns)
+        $hasSeparator = ($lines | Where-Object {
+            $_ -match '^\s*\|?\s*[-:]+(\s*\|\s*[-:]+)*\s*\|?\s*$'
+        }).Count -gt 0
         $pipeDataLines = ($lines | Where-Object { $_ -match '^\s*\|.+\|' }).Count
         if ($hasSeparator -and ($pipeDataLines -ge ($lines.Count * 0.5))) { return $true }
     }
+    # Box-drawing table
     $hasCorners = $text -match '[┌┐└┘╔╗╚╝]'
     $hasHorizLine = $text -match '[─━═]'
     $allLines = $text -split "`n"
@@ -90,26 +94,26 @@ function Test-IsTable([string]$text) {
 }
 
 function Test-IsExcluded([string]$text) {
-    # Trees and flowcharts — should not be cleaned
+    # Trees and flowcharts — should not be cleaned.
+    # Box-drawing TABLES must NOT be excluded.
     $allLines = $text -split "`n"
 
-    # File tree diagrams (├── └──)
-    $junctionLines = ($allLines | Where-Object { $_ -match '[├└]──' }).Count
-    if ($allLines.Count -gt 2 -and $junctionLines -ge 2) { return $true }
+    # File tree diagrams: lines with ├── or └── that are NOT table separators
+    $treeLines = @($allLines | Where-Object {
+        $_ -match '[├└]──' -and $_ -notmatch '[┼┤┴╪╡╧┬]'
+    }).Count
+    if ($allLines.Count -gt 2 -and $treeLines -ge 2) { return $true }
 
-    # Flowcharts: multiple box groups (2+ corner pairs) or arrow characters
-    # But NOT box-drawing tables — those have data rows with │ column separators
+    # Flowcharts: arrows are a definitive signal
     $hasCorners = $text -match '[┌┐└┘╔╗╚╝]'
     if ($hasCorners) {
-        # Arrows are a strong flowchart signal — always exclude
         $hasArrows = $text -match '──>' -or $text -match '[←→↑↓▶◀]'
         if ($hasArrows) { return $true }
 
-        # Multiple top-left corners suggest separate boxes (flowchart), not a table
+        # Multiple top-left corners without table data rows = separate boxes (flowchart)
         $cornerCount = ([regex]::Matches($text, '[┌╔]')).Count
-        $hasHorizLine = $text -match '[─━═]'
         $dataRows = @($allLines | Where-Object { $_ -match '^\s*[│║┃].+[│║┃]\s*$' }).Count
-        if ($dataRows -ge 1 -and $hasHorizLine) { return $false }
+        if ($dataRows -ge 1) { return $false }
         if ($cornerCount -ge 2) { return $true }
     }
 
@@ -134,91 +138,81 @@ function Test-IsCode([string]$text) {
     return $false
 }
 
-function Test-HasStructuralContent([string]$text) {
-    # Tier 1: Structural detection — we KNOW what this content is.
-    # These should always be cleaned regardless of artifact score.
-    $lines = ($text -split "`n") | Where-Object { $_.Trim() -ne '' }
-    if ($lines.Count -lt 2) { return $false }
+function Test-IsSecret([string]$text) {
+    # Detect tokens/passwords/keys/certs — these must never be modified.
+    $trimmed = $text.Trim()
 
-    # Markdown tables: | col | col | with a |---| separator
-    $hasSeparator = @($lines | Where-Object { $_ -match '^\s*\|?\s*[-:]+[-|:\s]+[-:]+\s*\|?\s*$' }).Count -gt 0
-    $pipeDataLines = @($lines | Where-Object { $_ -match '^\s*\|.+\|' }).Count
-    if ($hasSeparator -and $pipeDataLines -ge 2) { return $true }
+    # Multi-line secrets: PEM certificates, SSH keys, PGP blocks
+    if ($trimmed -match '-----BEGIN\s+(RSA\s+)?(PRIVATE|PUBLIC|CERTIFICATE|OPENSSH|PGP|EC)') { return $true }
 
-    # Box-drawing tables
-    $hasCorners = $text -match '[┌┐└┘╔╗╚╝]'
-    $hasHorizLine = $text -match '[─━═]'
-    $dataRows = @($lines | Where-Object { $_ -match '^\s*[│║┃].+[│║┃]\s*$' }).Count
-    if ($hasCorners -and $hasHorizLine -and $dataRows -ge 1) { return $true }
+    # Bearer/auth tokens on their own
+    if ($trimmed -match '(?i)^Bearer\s+[A-Za-z0-9\-_\.]+$') { return $true }
 
+    # Connection strings
+    if ($trimmed -match '(?i)(Server|Data Source|Host)=.*?(Password|Pwd)=') { return $true }
+
+    [string[]]$lines = @(($trimmed -split "`n") | Where-Object { $_.Trim() -ne '' })
+
+    # Multi-line base64 blob (e.g., cert body, key body)
+    if ($lines.Count -ge 2 -and $lines.Count -le 50) {
+        $base64Lines = @($lines | Where-Object { $_ -match '^[A-Za-z0-9+/=]{20,}$' }).Count
+        if ($base64Lines -ge ($lines.Count * 0.8)) { return $true }
+    }
+
+    if ($lines.Count -gt 3) { return $false }
+
+    $singleLine = if ($lines.Count -eq 1) { $lines[0].Trim() } else { $null }
+    if ($singleLine) {
+        # GitHub PAT
+        if ($singleLine -match '^gh[ps]_[A-Za-z0-9]{20,}$') { return $true }
+        # JWT
+        if ($singleLine -match '^eyJ[A-Za-z0-9_\-\.]{20,}$') { return $true }
+        # API key prefixes
+        if ($singleLine -match '^(sk-|api-|key-|token-)[A-Za-z0-9\-_]{15,}$') { return $true }
+        # Azure/AWS style keys
+        if ($singleLine -match '^[A-Za-z0-9+/]{40,}={0,2}$') { return $true }
+        # Generic: no spaces, 20+ chars, mix of upper/lower/digits
+        if ($singleLine.Length -ge 20 -and $singleLine -notmatch '\s' -and
+            $singleLine -match '[A-Z]' -and $singleLine -match '[a-z]' -and $singleLine -match '[0-9]') {
+            return $true
+        }
+    }
     return $false
 }
 
-function Test-HasTerminalArtifacts([string]$text) {
-    # Tier 2: Artifact detection — we THINK this came from a terminal.
-    # Score-based, needs >= 3 to trigger.
-    if ([string]::IsNullOrWhiteSpace($text)) { return $false }
-
-    $score = 0
-    $lines = $text -split "`n"
-    $totalLines = $lines.Count
-
-    # Short text (< 2 lines, < 50 chars) — skip to avoid mangling tokens/passwords
-    if ($totalLines -le 1 -and $text.Length -lt 50) { return $false }
-
-    # ANSI escape codes (strongest signal)
-    if ($text -match '\x1B\[') { $score += 4 }
-
-    # Box-drawing / pipe chars used as terminal wrapping
-    if ($text -match '[│┃╏╎▌┌┐└┘├┤┬┴┼╔╗╚╝╠╣╦╩╬═║─━]') { $score += 3 }
-
-    # Shell prompts (PS C:\>)
-    $promptLines = ($lines | Where-Object { $_ -match '^\s*(PS\s+[A-Z]:\\[^>]*>)' }).Count
-    if ($promptLines -ge 1) { $score += 3 }
-
-    # Terminal-wrapped prose: lines at similar width (within 10 chars of max)
-    # For 2 lines: only trigger if lines are very wide (≥100 chars, clearly terminal-wrapped)
-    # For 3+ lines: ≥60 chars is sufficient
-    $nonEmpty = $lines | Where-Object { $_.Trim() -ne '' }
-    if ($nonEmpty.Count -ge 2) {
-        $lengths = $nonEmpty | ForEach-Object { $_.TrimEnd().Length }
-        $maxLen = ($lengths | Measure-Object -Maximum).Maximum
-        $nearMax = @($lengths | Where-Object { $_ -ge ($maxLen - 10) }).Count
-        $minWidth = if ($nonEmpty.Count -eq 2) { 100 } else { 60 }
-        if ($nearMax -ge 2 -and $maxLen -ge $minWidth) { $score += 3 }
-    }
-
-    return $score -ge 3
-}
-
-function Test-ShouldClean([string]$text) {
-    # Two-tier detection model:
-    #   Exclusions: trees, flowcharts → never clean
-    #   Tier 1: Structural content (tables, etc.) → always clean
-    #   Tier 2: Terminal artifacts (ANSI, prompts, wrapping) → score-based
-    if ([string]::IsNullOrWhiteSpace($text)) { return $false }
-
-    # Exclusions first: trees and flowcharts should never be cleaned
-    if (Test-IsExcluded $text) { return $false }
-
-    # Tier 1: "I know what this is"
-    if (Test-HasStructuralContent $text) { return $true }
-
-    # Tier 2: "I think this came from a terminal"
-    return Test-HasTerminalArtifacts $text
+function Test-IsList([string]$text) {
+    # Detect bullet or numbered lists
+    $lines = ($text -split "`n") | Where-Object { $_.Trim() -ne '' }
+    if ($lines.Count -lt 2) { return $false }
+    $bulletLines = @($lines | Where-Object {
+        $_ -match '^\s*[-*•●▶▪◦]\s+' -or $_ -match '^\s*\d+\.\s+'
+    }).Count
+    return $bulletLines -ge 2
 }
 
 # ── Cleaning functions ───────────────────────────────────────────────────────
 
 function Remove-ShellPrompts([string]$text) {
-    # Only strip prompts that have a clear path prefix (PS C:\, C:\)
-    # Do NOT strip bare > or $ to avoid damaging quoted email or code
+    # Strip prompts with clear path/user prefix.
+    # Do NOT strip bare > or $ to avoid damaging quoted email or code.
     $lines = $text -split "`n"
     $cleaned = foreach ($line in $lines) {
-        $line -replace '^\s*PS\s+[A-Z]:\\[^>]*>\s*', '' `
-              -replace '^\s*[A-Z]:\\[^>]*>\s*', ''
+        $line -replace '^\s*PS\s+[A-Za-z]:\\[^>]*>\s*', '' `
+              -replace '^\s*PS\s+/[^>]*>\s*', '' `
+              -replace '^\s*[A-Z]:\\[^>]*>\s*', '' `
+              -replace '^\s*\S+@\S+:[^\$#]*[\$#]\s*', ''
     }
     return $cleaned -join "`n"
+}
+
+function Test-HasPrompts([string]$text) {
+    $lines = $text -split "`n"
+    $promptLines = ($lines | Where-Object {
+        $_ -match '^\s*PS\s+[A-Za-z]:[/\\]' -or
+        $_ -match '^\s*[A-Z]:\\[^>]*>' -or
+        $_ -match '^\s*\S+@\S+:[^\$#]*[\$#]\s'
+    }).Count
+    return $promptLines -ge 1
 }
 
 function Remove-LineNumbers([string]$text) {
@@ -253,22 +247,29 @@ function Convert-TableToHtml([string]$text) {
             $cells = $trimmed -split '[│║┃|]' |
                      ForEach-Object { $_.Trim() } |
                      Where-Object { $_ -ne '' }
-            if ($cells.Count -gt 1) {
+            if ($cells.Count -ge 1) {
                 [void]$rows.Add($cells)
             }
         }
     }
 
-    # Build HTML table with escaped content
-    $html = '<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;">'
+    # Build HTML table with escaped content — skip if no data rows parsed
+    if ($rows.Count -eq 0) {
+        $tsv = ($lines | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) -join "`n"
+        return @{ Html = $null; PlainText = $tsv }
+    }
+
+    $htmlParts = [System.Collections.ArrayList]::new()
+    [void]$htmlParts.Add('<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;">')
     $isFirst = $true
     foreach ($row in $rows) {
         $tag = if ($isFirst) { 'th' } else { 'td' }
         $cells = ($row | ForEach-Object { "<$tag>$(ConvertTo-HtmlSafe $_)</$tag>" }) -join ''
-        $html += "<tr>$cells</tr>"
+        [void]$htmlParts.Add("<tr>$cells</tr>")
         $isFirst = $false
     }
-    $html += '</table>'
+    [void]$htmlParts.Add('</table>')
+    $html = $htmlParts -join ''
 
     # Plain text fallback (tab-separated)
     $tsv = ($rows | ForEach-Object { $_ -join "`t" }) -join "`n"
@@ -314,7 +315,8 @@ function Parse-Blocks([string]$text) {
         }
 
         if ($currentType -and $lineType -ne $currentType) {
-            if ($currentType -eq 'List' -and $lineType -eq 'Paragraph') {
+            # Only join paragraph lines to list if they're indented (continuation)
+            if ($currentType -eq 'List' -and $lineType -eq 'Paragraph' -and $trimmed -match '^\s{2,}\S') {
                 [void]$currentLines.Add($trimmed)
                 continue
             }
@@ -358,26 +360,68 @@ function Render-ListBlock([string[]]$lines) {
 
 # ── Main pipeline ────────────────────────────────────────────────────────────
 
-function Invoke-CleanText([string]$text) {
-    # Returns a consistent structured payload:
-    #   @{ Kind = 'richtext'|'code'|'passthrough'; Html = ...; PlainText = ...; ShouldRewrite = $true/$false }
+function Get-CleanupPlan([string]$text) {
+    # Single entry point: normalize → guard → classify → render → return.
+    # Returns: @{ ShouldRewrite, Kind, Html, PlainText }
 
-    $result = Remove-AnsiEscapes $text
-    $result = Remove-LineNumbers $result
-    $result = Remove-ShellPrompts $result
+    $passthrough = @{ Kind = 'passthrough'; Html = $null; PlainText = $text; ShouldRewrite = $false }
 
-    # Code passes through untouched
-    if (Test-IsCode $result) {
-        return @{
-            Kind          = 'code'
-            Html          = $null
-            PlainText     = $result.Trim()
-            ShouldRewrite = $false
+    # ── 1. GUARD (pre-normalization) ─────────────────────────────────────
+    if ([string]::IsNullOrWhiteSpace($text)) { return $passthrough }
+
+    $lines = $text -split "`n"
+    $nonEmpty = @($lines | Where-Object { $_.Trim() -ne '' })
+    if ($nonEmpty.Count -le 1 -and $text.Trim().Length -lt 50) { return $passthrough }
+
+    # ── 2. NORMALIZE ─────────────────────────────────────────────────────
+    $hadAnsi = $text -match '\x1B\['
+    $hadPrompt = Test-HasPrompts $text
+
+    $normalized = Remove-AnsiEscapes $text
+    $normalized = Remove-LineNumbers $normalized
+    $normalized = Remove-ShellPrompts $normalized
+
+    # ── 3. GUARD (post-normalization) ────────────────────────────────────
+    if (Test-IsSecret $normalized) { return $passthrough }
+    if (Test-IsExcluded $normalized) { return $passthrough }
+
+    # ── 4. CLASSIFY ──────────────────────────────────────────────────────
+    # Check structural content FIRST — tables/lists take priority over code detection
+    # (a table cell containing code-like chars should still be treated as a table)
+    $hasTable = Test-IsTable $normalized
+    $hasList = Test-IsList $normalized
+    $hasStructure = $hasTable -or $hasList
+
+    if (-not $hasStructure -and (Test-IsCode $normalized)) {
+        # Code passes through but we still strip ANSI/prompts if they were present
+        if ($hadAnsi -or $hadPrompt) {
+            return @{ Kind = 'code'; Html = $null; PlainText = $normalized.Trim(); ShouldRewrite = $true }
         }
+        return $passthrough
     }
 
-    # Parse into blocks and render both HTML and plain text
-    $blocks = Parse-Blocks $result
+    # Terminal artifact score (on normalized text, plus flags from raw)
+    $artifactScore = 0
+    if ($hadAnsi) { $artifactScore += 4 }
+    if ($hadPrompt) { $artifactScore += 3 }
+    if ($normalized -match '[│┃╏╎▌┌┐└┘├┤┬┴┼╔╗╚╝╠╣╦╩╬═║─━]') { $artifactScore += 3 }
+
+    # Terminal-width wrapping detection
+    $normLines = @($normalized -split "`n" | Where-Object { $_.Trim() -ne '' })
+    if ($normLines.Count -ge 2) {
+        $lengths = $normLines | ForEach-Object { $_.TrimEnd().Length }
+        $maxLen = ($lengths | Measure-Object -Maximum).Maximum
+        $nearMax = @($lengths | Where-Object { $_ -ge ($maxLen - 10) }).Count
+        $minWidth = if ($normLines.Count -eq 2) { 100 } else { 60 }
+        if ($nearMax -ge 2 -and $maxLen -ge $minWidth) { $artifactScore += 3 }
+    }
+
+    $hasArtifacts = $artifactScore -ge 3
+
+    if (-not $hasStructure -and -not $hasArtifacts) { return $passthrough }
+
+    # ── 5. RENDER ────────────────────────────────────────────────────────
+    $blocks = Parse-Blocks $normalized
 
     $htmlParts = [System.Collections.ArrayList]::new()
     $plainParts = [System.Collections.ArrayList]::new()
@@ -386,7 +430,6 @@ function Invoke-CleanText([string]$text) {
     foreach ($block in $blocks) {
         switch ($block.Type) {
             'Blank' {
-                # Emit an empty paragraph to preserve spacing in Word/Outlook
                 [void]$htmlParts.Add('<p style="margin:0">&nbsp;</p>')
                 [void]$plainParts.Add('')
             }
@@ -401,7 +444,6 @@ function Invoke-CleanText([string]$text) {
             'List' {
                 $items = Render-ListBlock $block.Lines
                 $hasSemanticBlocks = $true
-                # Detect numbered vs bullet list
                 $isNumbered = $items[0] -match '^\s*\d+\.\s+'
                 $listTag = if ($isNumbered) { 'ol' } else { 'ul' }
                 $htmlItems = ($items | ForEach-Object {
@@ -412,9 +454,11 @@ function Invoke-CleanText([string]$text) {
                 [void]$plainParts.Add(($items -join "`n"))
             }
             'Table' {
-                $hasSemanticBlocks = $true
                 $tableResult = Convert-TableToHtml ($block.Lines -join "`n")
-                [void]$htmlParts.Add($tableResult.Html)
+                if ($tableResult.Html) {
+                    $hasSemanticBlocks = $true
+                    [void]$htmlParts.Add($tableResult.Html)
+                }
                 [void]$plainParts.Add($tableResult.PlainText)
             }
         }
@@ -423,13 +467,26 @@ function Invoke-CleanText([string]$text) {
     $plainText = ($plainParts -join "`n") -replace '(\r?\n){3,}', "`n`n"
     $plainText = $plainText.Trim()
     $htmlText = $htmlParts -join "`n"
+    $finalHtml = if ($hasSemanticBlocks) { $htmlText } else { $null }
+
+    # ── 6. FINAL CHECK ───────────────────────────────────────────────────
+    # Rewrite if: text content changed OR HTML enrichment is available
+    $textChanged = $plainText -ne $text.Trim()
+    $hasHtmlEnrichment = $finalHtml -ne $null
+    if (-not $textChanged -and -not $hasHtmlEnrichment) { return $passthrough }
 
     return @{
         Kind          = 'richtext'
-        Html          = if ($hasSemanticBlocks) { $htmlText } else { $null }
+        Html          = $finalHtml
         PlainText     = $plainText
         ShouldRewrite = $true
     }
+}
+
+# Backward-compatible wrapper (used by tests during transition)
+function Invoke-CleanText([string]$text) {
+    $plan = Get-CleanupPlan $text
+    return $plan
 }
 
 # ── Clipboard operations ────────────────────────────────────────────────────
@@ -516,7 +573,7 @@ if (-not $NoBalloon) {
 
 Write-Host ""
 Write-Host "  ╔══════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "  ║         CleanPaste v2.1.0                ║" -ForegroundColor Cyan
+Write-Host "  ║         CleanPaste v3.0.0                ║" -ForegroundColor Cyan
 Write-Host "  ║   Clipboard monitor is running...        ║" -ForegroundColor Cyan
 Write-Host "  ║   Copy terminal text and it gets         ║" -ForegroundColor Cyan
 Write-Host "  ║   cleaned automatically.                 ║" -ForegroundColor Cyan
@@ -525,7 +582,7 @@ Write-Host "  ║   Press Ctrl+C to stop.                  ║" -ForegroundColor
 Write-Host "  ╚══════════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
 
-Write-Log "CleanPaste v2.1.0 started (PollMs=$PollMs, NoBalloon=$NoBalloon)"
+Write-Log "CleanPaste v3.0.0 started (PollMs=$PollMs, NoBalloon=$NoBalloon)"
 
 # Initialize clipboard sequence number
 $script:lastSeqNum = [ClipboardApi]::GetClipboardSequenceNumber()
@@ -538,20 +595,21 @@ try {
         Start-Sleep -Milliseconds $PollMs
 
         try {
-            # Skip if we just wrote to the clipboard ourselves
-            if ($script:skipNextChange) {
-                $script:skipNextChange = $false
-                $script:lastSeqNum = [ClipboardApi]::GetClipboardSequenceNumber()
-                continue
-            }
-
             # Efficient change detection via Win32 sequence number (no hashing)
             $currentSeqNum = [ClipboardApi]::GetClipboardSequenceNumber()
             if ($currentSeqNum -eq $script:lastSeqNum) { continue }
             $script:lastSeqNum = $currentSeqNum
 
+            # Skip if this is the clipboard write we just made
+            if ($currentSeqNum -eq $script:writtenSeqNum) { continue }
+
             # Check if clipboard has text
             if (-not [System.Windows.Forms.Clipboard]::ContainsText()) { continue }
+
+            # Skip if clipboard already has rich HTML — content came from Word/browser/Outlook,
+            # not a terminal. Only terminal output needs cleaning.
+            $dataObj = [System.Windows.Forms.Clipboard]::GetDataObject()
+            if ($dataObj -and $dataObj.GetDataPresent("HTML Format")) { continue }
 
             $currentText = [System.Windows.Forms.Clipboard]::GetText()
             if ([string]::IsNullOrWhiteSpace($currentText)) { continue }
@@ -562,24 +620,18 @@ try {
             # Reset backoff on successful read
             $script:clipFailCount = 0
 
-            # Two-tier detection: structural content OR terminal artifacts
-            if (-not (Test-ShouldClean $currentText)) { continue }
-
-            # Clean the text
-            $payload = Invoke-CleanText $currentText
-
-            # Respect the payload's own decision
-            if (-not $payload.ShouldRewrite) { continue }
-
-            # Skip if plain text didn't actually change
-            if ($payload.PlainText -eq $currentText) { continue }
+            # Single-pass: normalize, classify, render
+            $plan = Get-CleanupPlan $currentText
+            if (-not $plan.ShouldRewrite) { continue }
 
             # Write cleaned content to clipboard
-            $script:skipNextChange = $true
-            $previewText = Set-ClipboardRich $payload
+            $previewText = Set-ClipboardRich $plan
+            # Track the sequence number AFTER successful write
+            $script:writtenSeqNum = [ClipboardApi]::GetClipboardSequenceNumber()
+            $script:lastSeqNum = $script:writtenSeqNum
             $script:cleanedCount++
 
-            Write-Log "Cleaned #$($script:cleanedCount) ($($payload.Kind)): $($previewText.Substring(0, [Math]::Min(80, $previewText.Length)))"
+            Write-Log "Cleaned #$($script:cleanedCount) ($($plan.Kind))"
 
             $preview = if ($previewText.Length -gt 80) { $previewText.Substring(0, 80) + "..." } else { $previewText }
             Write-Host "  [$(Get-Date -Format 'HH:mm:ss')] Cleaned clipboard (#$($script:cleanedCount))" -ForegroundColor Green
@@ -590,7 +642,7 @@ try {
                 $notifyIcon.ShowBalloonTip(
                     2000,
                     "CleanPaste",
-                    "Clipboard cleaned (#$($script:cleanedCount))",
+                    "Clipboard cleaned",
                     [System.Windows.Forms.ToolTipIcon]::Info
                 )
             }

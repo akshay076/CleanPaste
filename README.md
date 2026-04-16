@@ -29,7 +29,8 @@ Runs at every login. Install once, never think about it again.
 - **Code** — KQL queries, scripts, and code blocks pass through untouched
 - **Tree diagrams** — `├── └──` file trees stay intact
 - **Paragraph spacing** — blank lines in the original are preserved
-- **Flowcharts** — ASCII box diagrams are not modified
+- **Flowcharts** — ASCII box diagrams with arrows are not modified
+- **Secrets** — tokens, passwords, API keys, PEM/SSH keys, certificates pass through untouched
 
 ## How It Works
 
@@ -69,6 +70,7 @@ Runs at every login. Install once, never think about it again.
 CleanPaste is designed to be safe for always-on use:
 
 - **Confidence gating** — only rewrites clipboard when terminal artifacts are detected with high confidence (ANSI codes, box-drawing chars, shell prompts, terminal-width wrapping). Normal text, passwords, and tokens pass through untouched.
+- **Secret protection** — GitHub PATs, JWTs, API keys, PEM/SSH private keys, certificates, connection strings, and high-entropy tokens are detected and never modified.
 - **Short text protection** — single-line text under 50 characters is never modified, preventing accidental rewriting of passwords, tokens, or short commands.
 - **HTML injection prevention** — all content is HTML-escaped before rendering. Untrusted clipboard text cannot inject links, images, or markup into your Word/Outlook documents.
 - **No data collection** — everything runs locally. No network calls, no telemetry, no clipboard contents are ever transmitted.
@@ -78,7 +80,7 @@ CleanPaste is designed to be safe for always-on use:
 ## Known Limitations
 
 - **Code formatting in Word** — code blocks paste as plain text since Word is not a code editor. Indentation is preserved but syntax highlighting is not.
-- **Very large clipboard content** — no size cap currently; extremely large text (>1MB) may cause a brief delay.
+- **Very large clipboard content** — content over 512KB is skipped to avoid blocking the monitor.
 - **Non-text clipboard** — images, files, and other non-text clipboard content are ignored entirely.
 
 ## Logs
