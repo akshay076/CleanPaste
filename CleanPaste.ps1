@@ -432,7 +432,7 @@ function Set-ClipboardRich([hashtable]$payload) {
         $html = $payload.Html
 
         # Build CF_HTML format (Windows clipboard HTML standard)
-        $preamble = "<!DOCTYPE html><html><body><!--StartFragment-->"
+        $preamble = "<!DOCTYPE html><html><head><meta charset=`"utf-8`"></head><body><!--StartFragment-->"
         $postamble = "<!--EndFragment--></body></html>"
         $body = "$preamble$html$postamble"
 
@@ -447,7 +447,11 @@ function Set-ClipboardRich([hashtable]$payload) {
         $cfHtml = "$header$body"
 
         $dataObj = New-Object System.Windows.Forms.DataObject
-        $dataObj.SetData("HTML Format", $cfHtml)
+        # CF_HTML must be UTF-8 bytes, not a .NET string (UTF-16), or multi-byte
+        # characters like em-dashes get corrupted
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($cfHtml)
+        $stream = New-Object System.IO.MemoryStream(,$bytes)
+        $dataObj.SetData("HTML Format", $stream)
         $dataObj.SetData([System.Windows.Forms.DataFormats]::UnicodeText, $payload.PlainText)
         [System.Windows.Forms.Clipboard]::SetDataObject($dataObj, $true)
     } else {
