@@ -147,6 +147,15 @@ Assert-Test "Short text (password-like) does NOT trigger cleaning" {
     -not (Test-ShouldClean "ghp_abc123XYZ789token")
 }
 
+Assert-Test "Tree diagram NOT cleaned by pipeline" {
+    -not (Test-ShouldClean "src/`n├── file1`n│   ├── file2`n│   └── file3`n└── file4")
+}
+
+Assert-Test "Flowchart NOT cleaned by pipeline" {
+    $flow = "┌─────────┐     ┌─────────┐`n│  Start  │────>│   End   │`n└─────────┘     └─────────┘"
+    -not (Test-ShouldClean $flow)
+}
+
 Assert-Test "Plain text not detected as table" {
     -not (Test-IsTable "Hello world. This is plain text.")
 }

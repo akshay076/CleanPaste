@@ -92,10 +92,19 @@ function Test-IsTable([string]$text) {
 function Test-IsExcluded([string]$text) {
     # Trees and flowcharts — should not be cleaned
     $allLines = $text -split "`n"
+
+    # File tree diagrams (├── └──)
     $junctionLines = ($allLines | Where-Object { $_ -match '[├└]──' }).Count
     if ($allLines.Count -gt 2 -and $junctionLines -ge 2) { return $true }
+
+    # Flowcharts: multiple box groups (2+ corner pairs) or arrow characters
     $hasCorners = $text -match '[┌┐└┘╔╗╚╝]'
-    if ($hasCorners -and ($text -match '[─━═│┃║]') -and -not (Test-IsTable $text)) { return $true }
+    if ($hasCorners) {
+        $cornerCount = ([regex]::Matches($text, '[┌╔]')).Count
+        $hasArrows = $text -match '[────>←→↑↓▶◀]' -or $text -match '──>'
+        if ($cornerCount -ge 2 -or $hasArrows) { return $true }
+    }
+
     return $false
 }
 
@@ -160,13 +169,15 @@ function Test-HasTerminalArtifacts([string]$text) {
     if ($promptLines -ge 1) { $score += 3 }
 
     # Terminal-wrapped prose: lines at similar width (within 10 chars of max)
-    # 2+ lines at ≥ 60 chars wide is a strong enough signal
+    # For 2 lines: only trigger if lines are very wide (≥100 chars, clearly terminal-wrapped)
+    # For 3+ lines: ≥60 chars is sufficient
     $nonEmpty = $lines | Where-Object { $_.Trim() -ne '' }
     if ($nonEmpty.Count -ge 2) {
         $lengths = $nonEmpty | ForEach-Object { $_.TrimEnd().Length }
         $maxLen = ($lengths | Measure-Object -Maximum).Maximum
         $nearMax = @($lengths | Where-Object { $_ -ge ($maxLen - 10) }).Count
-        if ($nearMax -ge 2 -and $maxLen -ge 60) { $score += 3 }
+        $minWidth = if ($nonEmpty.Count -eq 2) { 100 } else { 60 }
+        if ($nearMax -ge 2 -and $maxLen -ge $minWidth) { $score += 3 }
     }
 
     return $score -ge 3
@@ -174,9 +185,13 @@ function Test-HasTerminalArtifacts([string]$text) {
 
 function Test-ShouldClean([string]$text) {
     # Two-tier detection model:
+    #   Exclusions: trees, flowcharts → never clean
     #   Tier 1: Structural content (tables, etc.) → always clean
     #   Tier 2: Terminal artifacts (ANSI, prompts, wrapping) → score-based
     if ([string]::IsNullOrWhiteSpace($text)) { return $false }
+
+    # Exclusions first: trees and flowcharts should never be cleaned
+    if (Test-IsExcluded $text) { return $false }
 
     # Tier 1: "I know what this is"
     if (Test-HasStructuralContent $text) { return $true }
@@ -468,7 +483,8 @@ function Write-Log([string]$message, [string]$level = 'INFO') {
 
 # ── Tray icon setup ─────────────────────────────────────────────────────────
 
-$notifyIcon = $null
+$notifyIcon  = $null
+$statusItem  = $null
 if (-not $NoBalloon) {
     $notifyIcon = New-Object System.Windows.Forms.NotifyIcon
     $notifyIcon.Icon = [System.Drawing.SystemIcons]::Information
@@ -527,6 +543,9 @@ try {
 
             $currentText = [System.Windows.Forms.Clipboard]::GetText()
             if ([string]::IsNullOrWhiteSpace($currentText)) { continue }
+
+            # Skip very large content to avoid blocking the loop
+            if ($currentText.Length -gt 512000) { continue }
 
             # Reset backoff on successful read
             $script:clipFailCount = 0

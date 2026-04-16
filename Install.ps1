@@ -93,9 +93,12 @@ $psExe = if ($PSVersionTable.PSVersion.Major -ge 7) {
 }
 Write-Host "  Using: $psExe" -ForegroundColor DarkGray
 
+# PS7 needs -Sta for clipboard/WinForms APIs (PS5.1 is STA by default)
+$staArg = if ($PSVersionTable.PSVersion.Major -ge 7) { "-Sta " } else { "" }
+
 $action  = New-ScheduledTaskAction `
     -Execute $psExe `
-    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptDest`""
+    -Argument "${staArg}-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptDest`""
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 
