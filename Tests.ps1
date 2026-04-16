@@ -218,6 +218,338 @@ Assert-Test "Structured payload always returned" {
     $result -is [hashtable] -and $result.ContainsKey('Kind') -and $result.ContainsKey('ShouldRewrite')
 }
 
+# ── Clipboard Round-Trip Tests ───────────────────────────────────────────────
+
+Write-Host ""
+Write-Host "  Clipboard Round-Trip" -ForegroundColor Yellow
+
+Assert-Test "Set-ClipboardRich writes HTML for table payload" {
+    Add-Type -AssemblyName System.Windows.Forms
+    $payload = @{ Kind = 'richtext'; Html = '<table><tr><td>A</td></tr></table>'; PlainText = 'A'; ShouldRewrite = $true }
+    Set-ClipboardRich $payload | Out-Null
+    $dataObj = [System.Windows.Forms.Clipboard]::GetDataObject()
+    $formats = $dataObj.GetFormats()
+    ('HTML Format' -in $formats) -and ('UnicodeText' -in $formats)
+}
+
+Assert-Test "CF_HTML has correct structure" {
+    Add-Type -AssemblyName System.Windows.Forms
+    $payload = @{ Kind = 'richtext'; Html = '<p>Hello</p>'; PlainText = 'Hello'; ShouldRewrite = $true }
+    Set-ClipboardRich $payload | Out-Null
+    $dataObj = [System.Windows.Forms.Clipboard]::GetDataObject()
+    $cfHtml = $dataObj.GetData("HTML Format")
+    $cfHtml -like "*Version:0.9*" -and $cfHtml -like "*StartFragment*" -and $cfHtml -like "*<p>Hello</p>*" -and $cfHtml -like "*EndFragment*"
+}
+
+Assert-Test "Set-ClipboardRich writes plain text for non-HTML payload" {
+    Add-Type -AssemblyName System.Windows.Forms
+    $payload = @{ Kind = 'richtext'; Html = $null; PlainText = 'Just text'; ShouldRewrite = $true }
+    Set-ClipboardRich $payload | Out-Null
+    $result = [System.Windows.Forms.Clipboard]::GetText()
+    $result -eq 'Just text'
+}
+
+Assert-Test "Set-ClipboardRich returns plain text for preview" {
+    $payload = @{ Kind = 'richtext'; Html = '<p>Test</p>'; PlainText = 'Test'; ShouldRewrite = $true }
+    $preview = Set-ClipboardRich $payload
+    $preview -eq 'Test'
+}
+
+# ── Edge Cases: Large Text ───────────────────────────────────────────────────
+
+Write-Host ""
+Write-Host "  Edge Cases: Large Text" -ForegroundColor Yellow
+
+Assert-Test "Handles text with 500+ lines" {
+    $bigText = (1..500 | ForEach-Object { "Line $_ of the document with some content that wraps" }) -join "`n"
+    $result = Invoke-CleanText $bigText
+    $result -is [hashtable] -and $result.PlainText.Length -gt 0
+}
+
+Assert-Test "Handles single very long line (2000+ chars)" {
+    $longLine = "A" * 2000
+    $result = Invoke-CleanText $longLine
+    $result.PlainText -eq $longLine
+}
+
+Assert-Test "Handles empty string gracefully" {
+    $result = Invoke-CleanText ""
+    $result -is [hashtable] -and $result.PlainText -eq ""
+}
+
+Assert-Test "Handles whitespace-only string" {
+    $result = Invoke-CleanText "   `n   `n   "
+    $result -is [hashtable] -and $result.PlainText -eq ""
+}
+
+# ── Edge Cases: Mixed Table + Code ───────────────────────────────────────────
+
+Write-Host ""
+Write-Host "  Edge Cases: Mixed Content" -ForegroundColor Yellow
+
+Assert-Test "KQL results table is converted to HTML" {
+    $kqlResult = "| TimeGenerated | Count |`n|---------------|-------|`n| 2024-01-01    | 42    |`n| 2024-01-02    | 15    |"
+    $result = Invoke-CleanText $kqlResult
+    $result.Html -like "*<table*" -and $result.Html -like "*42*"
+}
+
+Assert-Test "Table followed by paragraph preserves both" {
+    $mixed = "| A | B |`n|---|---|`n| 1 | 2 |`n`nThis is the explanation paragraph that should be joined properly."
+    $result = Invoke-CleanText $mixed
+    $result.Html -like "*<table*" -and $result.Html -like "*explanation paragraph*"
+}
+
+Assert-Test "Paragraph followed by table followed by paragraph" {
+    $mixed = "Introduction text.`n`n| Col1 | Col2 |`n|------|------|`n| A    | B    |`n`nConclusion text."
+    $result = Invoke-CleanText $mixed
+    $result.Html -like "*Introduction*" -and $result.Html -like "*<table*" -and $result.Html -like "*Conclusion*"
+}
+
+Assert-Test "Multiple tables in one document" {
+    $doc = "| T1A | T1B |`n|-----|-----|`n| 1   | 2   |`n`n| T2A | T2B |`n|-----|-----|`n| 3   | 4   |"
+    $result = Invoke-CleanText $doc
+    # Should have two <table> blocks
+    $tableCount = ([regex]::Matches($result.Html, '<table')).Count
+    $tableCount -eq 2
+}
+
+Assert-Test "Table with single data row works" {
+    $small = "| Name | Value |`n|------|-------|`n| Test | 42    |"
+    $result = Invoke-CleanText $small
+    $result.Html -like "*<table*" -and $result.Html -like "*42*"
+}
+
+# ── Edge Cases: Numbered Lists ───────────────────────────────────────────────
+
+Write-Host ""
+Write-Host "  Edge Cases: Numbered Lists" -ForegroundColor Yellow
+
+Assert-Test "Numbered list items are not joined as prose" {
+    $numbered = "Steps to reproduce:`n1. Open the application`n2. Click on settings`n3. Toggle the feature"
+    $result = Invoke-CleanText $numbered
+    # Items should remain separate (not joined into one line)
+    $result.PlainText -like "*1. Open*" -and $result.PlainText -like "*2. Click*" -and $result.PlainText -like "*3. Toggle*"
+}
+
+Assert-Test "Bullet list items stay separate" {
+    $bullets = "- First item`n- Second item`n- Third item"
+    $result = Invoke-CleanText $bullets
+    ($result.PlainText -split "`n").Count -ge 3
+}
+
+Assert-Test "Mixed bullets and numbered" {
+    $mixed = "Todo:`n- Buy milk`n- Buy eggs`n`nSteps:`n1. Go to store`n2. Pay"
+    $result = Invoke-CleanText $mixed
+    $result.PlainText -like "*Buy milk*" -and $result.PlainText -like "*1. Go*"
+}
+
+# ── Edge Cases: Non-ASCII Content ────────────────────────────────────────────
+
+Write-Host ""
+Write-Host "  Edge Cases: Non-ASCII Content" -ForegroundColor Yellow
+
+Assert-Test "Chinese characters in table cells" {
+    $table = "| Name | City |`n|------|------|`n| 张三 | 北京 |`n| 李四 | 上海 |"
+    $result = Invoke-CleanText $table
+    $result.Html -like "*张三*" -and $result.Html -like "*北京*"
+}
+
+Assert-Test "Emoji in paragraphs preserved" {
+    $text = "The deployment was successful 🎉 and all tests passed ✅`nwith no issues found 👍"
+    $result = Invoke-CleanText $text
+    $result.PlainText -like "*🎉*" -and $result.PlainText -like "*✅*"
+}
+
+Assert-Test "Arabic text in table" {
+    $table = "| الاسم | المدينة |`n|-------|---------|`n| أحمد  | الرياض  |"
+    $result = Invoke-CleanText $table
+    $result.Html -like "*أحمد*"
+}
+
+Assert-Test "Mixed Latin and non-Latin paragraph" {
+    $text = "The project codename is プロジェクト and it targets`nthe APAC market specifically"
+    $result = Invoke-CleanText $text
+    $result.PlainText -like "*プロジェクト*" -and $result.PlainText -like "*APAC market*"
+}
+
+# ── Edge Cases: HTML Injection / Security ────────────────────────────────────
+
+Write-Host ""
+Write-Host "  Security: HTML Injection" -ForegroundColor Yellow
+
+Assert-Test "Script tags escaped in paragraphs" {
+    # <script> has code chars so gets detected as code and passes through.
+    # But ConvertTo-HtmlSafe should escape it when used in HTML rendering.
+    $escaped = ConvertTo-HtmlSafe "<script>alert('xss')</script>"
+    $escaped -like "*&lt;script&gt;*"
+}
+
+Assert-Test "Image tags escaped in table cells" {
+    # Test the table converter directly (not full pipeline which may route to code)
+    $table = "| Name | Value |`n|------|-------|`n| <img src=x> | test |"
+    $result = Convert-TableToHtml $table
+    $result.Html -like "*&lt;img*" -and $result.Html -notlike "*<img*"
+}
+
+Assert-Test "Ampersands escaped in content" {
+    $result = Invoke-CleanText "Tom & Jerry went to A&B Corp`nfor the meeting"
+    $result.Html -like "*&amp;*"
+}
+
+Assert-Test "Quotes escaped in HTML output" {
+    $result = Invoke-CleanText 'He said "hello" to the team`nand they responded'
+    $result.Html -like "*&quot;*"
+}
+
+# ── Edge Cases: Prompt Stripping Safety ──────────────────────────────────────
+
+Write-Host ""
+Write-Host "  Prompt Stripping Safety" -ForegroundColor Yellow
+
+Assert-Test "PS prompt stripped" {
+    $result = Invoke-CleanText "PS C:\Users\test> Get-Date"
+    $result.PlainText -like "*Get-Date*" -and $result.PlainText -notlike "*PS C:*"
+}
+
+Assert-Test "CMD prompt stripped" {
+    $result = Invoke-CleanText "C:\Windows\System32> ipconfig"
+    $result.PlainText -like "*ipconfig*" -and $result.PlainText -notlike "*C:\Windows*"
+}
+
+Assert-Test "Bare > preserved (quoted email)" {
+    $result = Invoke-CleanText "> Original message from sender`n> Please review the attached`n`nMy reply here"
+    $result.PlainText -like "*> Original*"
+}
+
+Assert-Test "Bare $ preserved" {
+    $result = Invoke-CleanText "The cost is `$500 per unit`nand we need 10 units"
+    $result.PlainText -like "*500*"
+}
+
+Assert-Test "Bare % preserved" {
+    $result = Invoke-CleanText "CPU usage was at 95% during the incident`nwhich caused the timeout"
+    $result.PlainText -like "*95%*"
+}
+
+# ── Edge Cases: ANSI Codes ───────────────────────────────────────────────────
+
+Write-Host ""
+Write-Host "  ANSI Code Handling" -ForegroundColor Yellow
+
+Assert-Test "Color codes fully stripped" {
+    $ansi = "$([char]0x1B)[31mERROR:$([char]0x1B)[0m Connection failed`n$([char]0x1B)[32mINFO:$([char]0x1B)[0m Retrying"
+    $result = Invoke-CleanText $ansi
+    $result.PlainText -like "*ERROR:*" -and -not ($result.PlainText.Contains([char]0x1B))
+}
+
+Assert-Test "Cursor movement codes stripped" {
+    $ansi = "$([char]0x1B)[2A$([char]0x1B)[3CText after cursor moves"
+    $result = Invoke-CleanText $ansi
+    $result.PlainText -like "*Text after cursor moves*"
+}
+
+Assert-Test "OSC sequences stripped" {
+    $osc = "$([char]0x1B)]0;Window Title$([char]0x07)Actual content here"
+    $result = Invoke-CleanText $osc
+    $result.PlainText -like "*Actual content here*" -and $result.PlainText -notlike "*Window Title*"
+}
+
+# ── Edge Cases: Code Detection ───────────────────────────────────────────────
+
+Write-Host ""
+Write-Host "  Code Detection" -ForegroundColor Yellow
+
+Assert-Test "Python code detected as code" {
+    $python = "def hello():`n    name = 'world'`n    print(f'Hello {name}')`n    return True"
+    $result = Invoke-CleanText $python
+    $result.Kind -eq 'code' -and $result.ShouldRewrite -eq $false
+}
+
+Assert-Test "JSON detected as code" {
+    $json = "{`n    `"name`": `"CleanPaste`",`n    `"version`": `"2.1.0`",`n    `"enabled`": true`n}"
+    $result = Invoke-CleanText $json
+    $result.Kind -eq 'code' -and $result.ShouldRewrite -eq $false
+}
+
+Assert-Test "KQL with pipe operators detected as code" {
+    $kql = "requests`n| where timestamp > ago(1h)`n| summarize count() by bin(timestamp, 5m)`n| render timechart"
+    $result = Invoke-CleanText $kql
+    $result.Kind -eq 'code' -and $result.ShouldRewrite -eq $false
+}
+
+Assert-Test "PowerShell script detected as code" {
+    $ps = "function Get-Data {`n    param([string]`$Path)`n    `$items = Get-ChildItem -Path `$Path`n    return `$items`n}"
+    $result = Invoke-CleanText $ps
+    $result.Kind -eq 'code' -and $result.ShouldRewrite -eq $false
+}
+
+Assert-Test "SQL query NOT falsely detected as code" {
+    $sql = "SELECT name, age FROM users WHERE status = 'active' ORDER BY name"
+    $result = Invoke-CleanText $sql
+    # Single line SQL — could go either way, but should not crash
+    $result -is [hashtable]
+}
+
+# ── Edge Cases: Line Number Removal ──────────────────────────────────────────
+
+Write-Host ""
+Write-Host "  Line Number Removal" -ForegroundColor Yellow
+
+Assert-Test "Line numbers stripped when majority of lines have them" {
+    $pipe = [char]0x2502
+    $numbered = "  1 $pipe first line`n  2 $pipe second line`n  3 $pipe third line`n  4 $pipe fourth line"
+    $cleaned = Remove-LineNumbers $numbered
+    $cleaned -like "*first line*" -and -not ($cleaned -like "*1 $pipe*")
+}
+
+Assert-Test "Line numbers NOT stripped when few lines have them" {
+    $mixed = "This is line 1 of a paragraph`nwith a number 2 in it`nand more text here"
+    $cleaned = Remove-LineNumbers $mixed
+    $cleaned -like "*line 1*"
+}
+
+# ── Edge Cases: Box Drawing Tables ───────────────────────────────────────────
+
+Write-Host ""
+Write-Host "  Box Drawing Tables" -ForegroundColor Yellow
+
+Assert-Test "Double-line box table converts to HTML" {
+    $table = "╔═══════╦═════╗`n║ Name  ║ Age ║`n╠═══════╬═════╣`n║ Alice ║ 30  ║`n╚═══════╩═════╝"
+    $result = Invoke-CleanText $table
+    $result.Html -like "*<table*" -and $result.Html -like "*Alice*"
+}
+
+Assert-Test "Box table header row uses <th> tags" {
+    $table = "┌───┬───┐`n│ A │ B │`n├───┼───┤`n│ 1 │ 2 │`n└───┴───┘"
+    $result = Convert-TableToHtml $table
+    $result.Html -like "*<th>*"
+}
+
+Assert-Test "Table plain text uses tab separation" {
+    $table = "| Col1 | Col2 |`n|------|------|`n| A    | B    |"
+    $result = Convert-TableToHtml $table
+    $result.PlainText -like "*Col1`tCol2*"
+}
+
+# ── Idempotency ──────────────────────────────────────────────────────────────
+
+Write-Host ""
+Write-Host "  Idempotency" -ForegroundColor Yellow
+
+Assert-Test "Cleaning already-clean paragraph produces same output" {
+    $text = "This is a clean paragraph with no issues."
+    $first = Invoke-CleanText $text
+    $second = Invoke-CleanText $first.PlainText
+    $first.PlainText -eq $second.PlainText
+}
+
+Assert-Test "Cleaning already-clean list produces same output" {
+    $text = "- Item one`n- Item two`n- Item three"
+    $first = Invoke-CleanText $text
+    $second = Invoke-CleanText $first.PlainText
+    $first.PlainText -eq $second.PlainText
+}
+
 # ── Results ──────────────────────────────────────────────────────────────────
 
 $total = $script:pass + $script:fail

@@ -199,11 +199,16 @@ function Remove-ShellPrompts([string]$text) {
 
 function Remove-LineNumbers([string]$text) {
     $lines = $text -split "`n"
-    # Only strip when 60%+ of lines have the pattern (avoid false positives on numbered lists)
-    $numberedCount = ($lines | Where-Object { $_ -match '^\s*\d+[\s│|┃\.]\s' }).Count
+    $pipe = [char]0x2502  # │
+    $doublePipe = [char]0x2503  # ┃
+    # Count lines that start with digits followed by a separator
+    $numberedCount = ($lines | Where-Object {
+        $trimmed = $_.TrimStart()
+        $trimmed -match '^\d+\s*[\.\|]' -or $trimmed.Length -gt 2 -and [char]::IsDigit($trimmed[0]) -and ($trimmed.Contains($pipe) -or $trimmed.Contains($doublePipe))
+    }).Count
     if ($lines.Count -gt 2 -and $numberedCount -ge ($lines.Count * 0.6)) {
         $cleaned = foreach ($line in $lines) {
-            $line -replace '^\s*\d+\s*[│|┃\.]\s?', ''
+            $line -replace ('^\s*\d+\s*[' + $pipe + $doublePipe + '\.\|]\s?'), ''
         }
         return $cleaned -join "`n"
     }
@@ -268,7 +273,7 @@ function Parse-Blocks([string]$text) {
             ($stripped -match '^[┌┐└┘├┤┬┴┼╔╗╚╝╠╣╦╩╬─━═┈┉\s]+$')
         ) {
             $lineType = 'Table'
-        } elseif ($stripped -match '^\s*[-*•●▶▪◦]\s+') {
+        } elseif ($stripped -match '^\s*[-*•●▶▪◦]\s+' -or $stripped -match '^\s*\d+\.\s+') {
             $lineType = 'List'
         } else {
             $lineType = 'Paragraph'
@@ -316,7 +321,7 @@ function Render-ListBlock([string[]]$lines) {
 
     foreach ($line in $lines) {
         $stripped = $line.Trim()
-        if ($stripped -match '^\s*[-*•●▶▪◦]\s+') {
+        if ($stripped -match '^\s*[-*•●▶▪◦]\s+' -or $stripped -match '^\s*\d+\.\s+') {
             if ($currentItem -ne '') { [void]$items.Add($currentItem) }
             $currentItem = $stripped
         } else {
@@ -372,11 +377,14 @@ function Invoke-CleanText([string]$text) {
             'List' {
                 $items = Render-ListBlock $block.Lines
                 $hasSemanticBlocks = $true
+                # Detect numbered vs bullet list
+                $isNumbered = $items[0] -match '^\s*\d+\.\s+'
+                $listTag = if ($isNumbered) { 'ol' } else { 'ul' }
                 $htmlItems = ($items | ForEach-Object {
-                    $stripped = $_ -replace '^\s*[-*•●▶▪◦]\s+', ''
+                    $stripped = $_ -replace '^\s*[-*•●▶▪◦]\s+', '' -replace '^\s*\d+\.\s+', ''
                     "<li>$(ConvertTo-HtmlSafe $stripped)</li>"
                 }) -join ''
-                [void]$htmlParts.Add("<ul style=`"margin:0`">$htmlItems</ul>")
+                [void]$htmlParts.Add("<$listTag style=`"margin:0`">$htmlItems</$listTag>")
                 [void]$plainParts.Add(($items -join "`n"))
             }
             'Table' {
