@@ -57,6 +57,7 @@ public class ClipboardApi {
 $script:lastSeqNum     = 0
 $script:cleanedCount   = 0
 $script:running        = $true
+$script:paused         = $false
 $script:writtenSeqNum  = -1
 
 # ── HTML escaping ────────────────────────────────────────────────────────────
@@ -188,6 +189,30 @@ function Test-IsList([string]$text) {
         $_ -match '^\s*[-*•●▶▪◦]\s+' -or $_ -match '^\s*\d+\.\s+'
     }).Count
     return $bulletLines -ge 2
+}
+
+function Test-IsColumnarData([string]$text) {
+    # Detect space-aligned tabular data (e.g., Format-Table, kubectl, Agency CLI).
+    # These have columns separated by 2+ consecutive spaces at consistent positions.
+    [string[]]$lines = @(($text -split "`n") | Where-Object { $_.Trim() -ne '' })
+    if ($lines.Count -lt 2) { return $false }
+
+    # Check for dash-separator row (strong signal): ---  ------  -----
+    $hasDashSep = ($lines | Where-Object { $_ -match '^\s*[-]+(\s{2,}[-]+){1,}\s*$' }).Count -gt 0
+
+    # Count lines with 2+ groups of whitespace acting as column separators
+    # Pattern: non-space content, then 2+ spaces, then non-space content, repeated
+    $columnarLines = @($lines | Where-Object {
+        $_ -match '\S\s{2,}\S.*\S\s{2,}\S'
+    }).Count
+
+    # Strong signal: dash separator + most lines are columnar
+    if ($hasDashSep -and $columnarLines -ge 1) { return $true }
+
+    # Weaker signal: most lines have consistent multi-space gaps (3+ lines needed)
+    if ($lines.Count -ge 3 -and $columnarLines -ge ($lines.Count * 0.6)) { return $true }
+
+    return $false
 }
 
 # ── Cleaning functions ───────────────────────────────────────────────────────
@@ -384,6 +409,14 @@ function Get-CleanupPlan([string]$text) {
     # ── 3. GUARD (post-normalization) ────────────────────────────────────
     if (Test-IsSecret $normalized) { return $passthrough }
     if (Test-IsExcluded $normalized) { return $passthrough }
+    if (-not (Test-IsTable $normalized) -and (Test-IsColumnarData $normalized)) {
+        # Space-aligned tables (Format-Table, kubectl, Agency) — pass through intact
+        # We strip ANSI/prompts but don't reformat
+        if ($hadAnsi -or $hadPrompt) {
+            return @{ Kind = 'columnar'; Html = $null; PlainText = $normalized.Trim(); ShouldRewrite = $true }
+        }
+        return $passthrough
+    }
 
     # ── 4. CLASSIFY ──────────────────────────────────────────────────────
     # Check structural content FIRST — tables/lists take priority over code detection
@@ -562,6 +595,21 @@ if (-not $NoBalloon) {
 
     # Add right-click context menu
     $contextMenu = New-Object System.Windows.Forms.ContextMenuStrip
+    $script:pauseItem = $contextMenu.Items.Add("Pause CleanPaste")
+    $script:pauseItem.Add_Click({
+        $script:paused = -not $script:paused
+        if ($script:paused) {
+            $script:pauseItem.Text = "Resume CleanPaste"
+            $notifyIcon.Icon = [System.Drawing.SystemIcons]::Warning
+            $notifyIcon.Text = "CleanPaste - PAUSED"
+            $notifyIcon.ShowBalloonTip(1500, "CleanPaste", "Paused — clipboard will not be cleaned", [System.Windows.Forms.ToolTipIcon]::Warning)
+        } else {
+            $script:pauseItem.Text = "Pause CleanPaste"
+            $notifyIcon.Icon = [System.Drawing.SystemIcons]::Information
+            $notifyIcon.Text = "CleanPaste - Clipboard Monitor"
+            $notifyIcon.ShowBalloonTip(1500, "CleanPaste", "Resumed — clipboard cleaning active", [System.Windows.Forms.ToolTipIcon]::Info)
+        }
+    })
     $exitItem = $contextMenu.Items.Add("Exit CleanPaste")
     $exitItem.Add_Click({ $script:running = $false })
     $statusItem = $contextMenu.Items.Add("Cleaned: 0 items")
@@ -592,6 +640,8 @@ $script:maxBackoffMs  = 5000
 
 try {
     while ($script:running) {
+        # Process Windows message events (tray icon clicks, menu events)
+        [System.Windows.Forms.Application]::DoEvents()
         Start-Sleep -Milliseconds $PollMs
 
         try {
@@ -602,6 +652,9 @@ try {
 
             # Skip if this is the clipboard write we just made
             if ($currentSeqNum -eq $script:writtenSeqNum) { continue }
+
+            # Skip if paused
+            if ($script:paused) { continue }
 
             # Check if clipboard has text
             if (-not [System.Windows.Forms.Clipboard]::ContainsText()) { continue }
@@ -660,8 +713,11 @@ try {
 finally {
     if ($notifyIcon) {
         $notifyIcon.Visible = $false
+        $notifyIcon.Icon = $null
         $notifyIcon.Dispose()
     }
+    if ($contextMenu) { $contextMenu.Dispose() }
+    [System.Windows.Forms.Application]::DoEvents()
     Write-Log "CleanPaste stopped. Cleaned $($script:cleanedCount) items total."
     Write-Host "`n  CleanPaste stopped. Cleaned $($script:cleanedCount) items total." -ForegroundColor Yellow
 }

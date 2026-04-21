@@ -311,6 +311,24 @@ Assert-Test "T37: PEM key passes through" {
     -not $r.ShouldRewrite
 }
 
+Assert-Test "T38: Space-aligned table (Agency) passes through" {
+    $t = "#  ADO ID    Title                                                       KPI        State`n14 37439829  [Delaware] Upgrade microsoft.bcl.memory 9.0.8 - CVE-2026-26127  SFI-ES5.2  Active`n13 36963814  [PSScriptAnalyzer] Fix ConvertTo-SecureString in Deploy scripts   SFI-PS3.1  To Do"
+    $r = Get-CleanupPlan $t
+    -not $r.ShouldRewrite -or ($r.PlainText -like "*37439829*36963814*" -and ($r.PlainText -split "`n").Count -ge 3)
+}
+
+Assert-Test "T39: Format-Table with dash separator passes through" {
+    $t = "Name         Status   DisplayName`n----         ------   -----------`nAppinfo      Running  Application Information`nAudiosrv     Running  Windows Audio`nBFE          Running  Base Filtering Engine"
+    $r = Get-CleanupPlan $t
+    -not $r.ShouldRewrite -or ($r.PlainText -like "*Appinfo*" -and ($r.PlainText -split "`n").Count -ge 4)
+}
+
+Assert-Test "T40: kubectl-style output passes through" {
+    $t = "NAME                    READY   STATUS    RESTARTS   AGE`npod-auth-7d4f8b         1/1     Running   0          2d`npod-api-9c3e1a          1/1     Running   1          5d`npod-worker-2b8f4c       0/1     CrashLoop 3          1h"
+    $r = Get-CleanupPlan $t
+    -not $r.ShouldRewrite -or ($r.PlainText -like "*pod-auth*" -and ($r.PlainText -split "`n").Count -ge 4)
+}
+
 # ── Helper function tests ───────────────────────────────────────────────────
 
 Write-Host ""

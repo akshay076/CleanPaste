@@ -2,7 +2,9 @@
 
 **Always-on clipboard monitor that auto-cleans terminal output when you copy.**
 
-Copy from any terminal (Claude Code, Copilot CLI, Codex, PowerShell) and paste clean, formatted text into Word, Outlook, Teams, Excel, or any app. Tables become real bordered tables, broken paragraph wraps get re-joined, and bullet lists stay intact.
+Copy from any terminal (Claude Code, Copilot CLI, Agency, Codex, PowerShell) and paste clean, formatted text into Word, Outlook, Teams, Excel, or any app. Tables become real bordered tables, broken paragraph wraps get re-joined, and bullet lists stay intact.
+
+Only touches plain-text clipboard content from terminals — anything you copy from Word, Excel, browser, Teams, or any rich app passes through untouched.
 
 ## Quick Install (one-liner)
 
@@ -31,19 +33,26 @@ Runs at every login. Install once, never think about it again.
 - **Paragraph spacing** — blank lines in the original are preserved
 - **Flowcharts** — ASCII box diagrams with arrows are not modified
 - **Secrets** — tokens, passwords, API keys, PEM/SSH keys, certificates pass through untouched
+- **Space-aligned tables** — columnar output from Agency, `Format-Table`, `kubectl`, `docker ps` stays intact
+- **Rich content** — anything copied from Word, Excel, browser, Teams, or Outlook is never touched
+
+## Pause / Resume
+
+Right-click the CleanPaste system tray icon to pause or resume cleaning:
+
+- **Pause CleanPaste** — temporarily stops cleaning (icon changes to ⚠️). Useful when you need to paste raw markdown into a GitHub PR or wiki editor.
+- **Resume CleanPaste** — re-enables cleaning.
+- **Exit CleanPaste** — stops the monitor entirely.
 
 ## How It Works
 
 1. Detects clipboard changes via Win32 `GetClipboardSequenceNumber()` API (lightweight, no text hashing)
-2. Scores content for terminal artifacts — only rewrites when confidence is high (passwords/tokens pass through)
-3. Parses content into **blocks**: paragraphs, tables, lists, blanks
-4. Renders each block appropriately:
-   - Paragraphs: re-joins broken terminal line wraps
-   - Tables: converts to HTML clipboard format (renders with borders in Office)
-   - Lists: preserves bullets, joins wrapped continuations
-   - Code: passes through unchanged
-5. Writes cleaned content back to clipboard
-6. Shows a system tray notification on each clean
+2. Skips rich clipboard content (HTML Format present = came from an app, not a terminal)
+3. Normalizes terminal text (strips ANSI, prompts, line numbers)
+4. Classifies content: secret? code? tree? columnar data? table? list? paragraph?
+5. Renders cleanable content into HTML + plain text
+6. Writes both formats to clipboard — rich apps get HTML, plain editors get text
+7. Shows a system tray notification on each clean
 
 ## Manual Usage
 
@@ -69,12 +78,13 @@ Runs at every login. Install once, never think about it again.
 
 CleanPaste is designed to be safe for always-on use:
 
+- **Rich content passthrough** — clipboard content from Word, Excel, browsers, Teams, and other rich apps is never touched. Only plain-text terminal output is processed.
 - **Confidence gating** — only rewrites clipboard when terminal artifacts are detected with high confidence (ANSI codes, box-drawing chars, shell prompts, terminal-width wrapping). Normal text, passwords, and tokens pass through untouched.
 - **Secret protection** — GitHub PATs, JWTs, API keys, PEM/SSH private keys, certificates, connection strings, and high-entropy tokens are detected and never modified.
 - **Short text protection** — single-line text under 50 characters is never modified, preventing accidental rewriting of passwords, tokens, or short commands.
 - **HTML injection prevention** — all content is HTML-escaped before rendering. Untrusted clipboard text cannot inject links, images, or markup into your Word/Outlook documents.
-- **No data collection** — everything runs locally. No network calls, no telemetry, no clipboard contents are ever transmitted.
-- **Safe prompt stripping** — only removes prompts with explicit path prefixes (`PS C:\>`, `C:\>`). Bare `>` characters are preserved, so quoted email text and code are not damaged.
+- **No data collection** — everything runs locally. No network calls, no telemetry, no clipboard contents are ever logged or transmitted.
+- **Safe prompt stripping** — only removes prompts with explicit path prefixes (`PS C:\>`, `C:\>`, `user@host:path$`). Bare `>` and `$` characters are preserved.
 - **Idempotent** — running the cleaner on already-clean text produces identical output. No infinite rewrite loops.
 
 ## Known Limitations
@@ -82,15 +92,20 @@ CleanPaste is designed to be safe for always-on use:
 - **Code formatting in Word** — code blocks paste as plain text since Word is not a code editor. Indentation is preserved but syntax highlighting is not.
 - **Very large clipboard content** — content over 512KB is skipped to avoid blocking the monitor.
 - **Non-text clipboard** — images, files, and other non-text clipboard content are ignored entirely.
+- **Space-aligned tables** — columnar terminal output (e.g., `kubectl`, `Format-Table`) passes through as-is rather than being converted to bordered tables.
 
 ## Logs
 
-Errors and cleaning events are logged to `~\.cleanpaste\cleanpaste.log` (auto-rotates at 1MB).
+Errors and cleaning events are logged to `~\.cleanpaste\cleanpaste.log` (auto-rotates at 1MB). No clipboard content is logged.
 
 ## Running Tests
 
 ```powershell
+# Spec tests (68 tests)
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Tests.ps1
+
+# Stress tests (227 tests)
+powershell -NoProfile -ExecutionPolicy Bypass -File .\StressTest.ps1
 ```
 
 ## Distribution
